@@ -23,12 +23,17 @@ pub fn build(b: *std.build.Builder) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&exe_tests.step);
 
-    const run_cmd = exe.run();
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    const enc_cmd = exe.run();
+    enc_cmd.step.dependOn(b.getInstallStep());
+    enc_cmd.addArgs(&[_][]const u8{"encrypt"});
 
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
+    const enc_step = b.step("run-enc", "Run unicipher encrypt");
+    enc_step.dependOn(&enc_cmd.step);
+
+    const dec_cmd = exe.run();
+    dec_cmd.step.dependOn(b.getInstallStep());
+    dec_cmd.addArgs(&[_][]const u8{"decrypt"});
+
+    const dec_step = b.step("run-dec", "Run unicipher decrypt");
+    dec_step.dependOn(&dec_cmd.step);
 }
