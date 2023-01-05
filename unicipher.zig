@@ -5,6 +5,73 @@ const io = std.io;
 const fs = std.fs;
 const unicode = std.unicode;
 
+const kurtisCipher = struct {
+    fn cipher() Cipher {
+        return .{ .encode = encode, .decode = decode };
+    }
+
+    fn encode(c0: u7, c1: u7) u21 {
+        const msb0 = @intCast(u14, c0 & 0b0100_0000) >> 6;
+        const msb1 = @intCast(u14, c1 & 0b0100_0000) >> 6;
+        const rem0 = @intCast(u14, c0 & 0b0011_1111);
+        const rem1 = @intCast(u14, c1 & 0b0011_1111);
+        return @intCast(u21, ((msb0 << 1 | msb1) << 6 | rem0) << 6 | rem1);
+    }
+
+    fn decode(unic: u21) ![2]u7 {
+        if (unic > std.math.maxInt(u14)) {
+            return error.CodepointOutOfRange;
+        }
+
+        // 0b_ab_aaaaaa_bbbbbb
+        const c = @intCast(u14, unic);
+        const rem1 = @intCast(u7, c & 0b111111);
+        const rem0 = @intCast(u7, (c >> 6) & 0b111111);
+        const msb1 = @intCast(u7, (c >> 12) & 0b1);
+        const msb0 = @intCast(u7, (c >> 13) & 0b1);
+        return .{
+            msb0 << 6 | rem0,
+            msb1 << 6 | rem1,
+        };
+    }
+};
+
+const blockmixCipher = struct {
+    fn cipher() Cipher {
+        return .{ .encode = encode, .decode = decode };
+    }
+
+    fn encode(c0: u7, c1: u7) u21 {
+        const blk1 = @intCast(u14, c0 & 0b0110_0000) >> 5;
+        const blk2 = @intCast(u14, c1 & 0b0110_0000) >> 5;
+        const seq0 = @intCast(u14, c0 & 0b0001_1111);
+        const seq1 = @intCast(u14, c1 & 0b0001_1111);
+        const blk = ~(blk1 << 2 | blk2) & 0b1111;
+        return @intCast(u21, (blk << 5 | seq0) << 5 | seq1);
+    }
+
+    fn decode(unic: u21) ![2]u7 {
+        if (unic > std.math.maxInt(u14)) {
+            return error.CodepointOutOfRange;
+        }
+
+        // 0b_aabb_aaaaa_bbbbb
+        const c = @intCast(u14, unic);
+        const seq1 = @intCast(u7, c & 0b11111);
+        const seq0 = @intCast(u7, (c >> 5) & 0b11111);
+        const blk = @intCast(u7, (~c >> 10) & 0b1111);
+        const blk1 = blk & 0b11;
+        const blk0 = (blk >> 2) & 0b11;
+        return .{
+            blk0 << 5 | seq0,
+            blk1 << 5 | seq1,
+        };
+    }
+};
+
+// TODO interlaveCipher -- does what it says on the tin: (0b0xxx_xxxx, 0b0yyy_yyyy) <-> 0b00xy_xyxy_xyxy_xyxy)
+// TODO 3-arity variants of blockMix and interlave
+
 const Cipher = struct {
     encode: *const fn (c0: u7, c1: u7) u21,
     decode: *const fn (unic: u21) anyerror![2]u7,
@@ -59,36 +126,36 @@ const Cipher = struct {
             try writer.writeAll(tmp[0..len]);
         }
     }
-};
 
-const kurtisCipher = struct {
-    fn box() Cipher {
-        return .{ .encode = encode, .decode = decode };
-    }
+    fn expectRoundTrip(self: Self, comptime in: []const u8) !void {
+        std.debug.print("\n=== expect roundtrip `{s}` {any}\n", .{
+            in,
+            std.fmt.fmtSliceHexUpper(in),
+        });
 
-    fn encode(c0: u7, c1: u7) u21 {
-        const msb0 = @intCast(u14, c0 & 0b0100_0000) >> 6;
-        const msb1 = @intCast(u14, c1 & 0b0100_0000) >> 6;
-        const rem0 = @intCast(u14, c0 & 0b0011_1111);
-        const rem1 = @intCast(u14, c1 & 0b0011_1111);
-        return @intCast(u21, ((msb0 << 1 | msb1) << 6 | rem0) << 6 | rem1);
-    }
+        var tmp = [_]u8{0} ** (4 * in.len);
+        var out = [_]u8{0} ** (4 * in.len);
 
-    fn decode(unic: u21) ![2]u7 {
-        if (unic > std.math.maxInt(u14)) {
-            return error.InvalidKurtisCipherCode;
-        }
+        var fix_in = io.fixedBufferStream(in);
+        var fix_tmp = io.fixedBufferStream(&tmp);
+        try self.encrypt(fix_in.reader(), fix_tmp.writer());
+        std.debug.print("> encrypted `{s}` {any}\n", .{
+            fix_tmp.getWritten(),
+            std.fmt.fmtSliceHexUpper(fix_tmp.getWritten()),
+        });
 
-        // 0b_ab_aaaaaa_bbbbbb
-        const c = @intCast(u14, unic);
-        const rem1 = @intCast(u7, c & 0b111111);
-        const rem0 = @intCast(u7, (c >> 6) & 0b111111);
-        const msb1 = @intCast(u7, (c >> 12) & 0b1);
-        const msb0 = @intCast(u7, (c >> 13) & 0b1);
-        return .{
-            msb0 << 6 | rem0,
-            msb1 << 6 | rem1,
-        };
+        var fix_retmp = io.fixedBufferStream(fix_tmp.getWritten());
+        var fix_out = io.fixedBufferStream(&out);
+        try self.decrypt(fix_retmp.reader(), fix_out.writer());
+        std.debug.print("> decrypted `{s}` {any}\n", .{
+            fix_out.getWritten(),
+            std.fmt.fmtSliceHexUpper(fix_out.getWritten()),
+        });
+
+        try std.testing.expectEqualStrings(
+            in,
+            std.mem.trimRight(u8, fix_out.getWritten(), "\n"),
+        );
     }
 };
 
@@ -109,10 +176,6 @@ fn readUtf8(reader: anytype) !u21 {
     return try unicode.utf8Decode(tmp[0..uni_len]);
 }
 
-// TODO blockMixCipher -- using 2/5 ascii mechanical sympathy, rather than the 1/6 msb split ala kurtis
-// TODO interlaveCipher -- does what it says on the tin: (0b0xxx_xxxx, 0b0yyy_yyyy) <-> 0b00xy_xyxy_xyxy_xyxy)
-// TODO 3-arity variants of blockMix and interlave
-
 fn elideEof(err: anyerror) !void {
     switch (err) {
         error.EndOfStream => return,
@@ -120,49 +183,25 @@ fn elideEof(err: anyerror) !void {
     }
 }
 
-test "per kurtis" {
-    // TODO refactor around some fn testCipher(Cipher, cases)
-    const test_cases = [_][]const u8{
-        "ad",
-        "adgc",
-        "bbb",
-        "x",
-        "another",
-        "hello there",
-    };
+const test_cases = [_][]const u8{
+    "ad",
+    "adgc",
+    "bbb",
+    "x",
+    "another",
+    "hello there",
+};
 
-    const cipher = kurtisCipher.box();
+test "kurtisCipher" {
+    const cipher = kurtisCipher.cipher();
+    inline for (test_cases) |test_case|
+        try cipher.expectRoundTrip(test_case);
+}
 
-    for (test_cases) |test_case| {
-        std.debug.print("\n=== test case `{s}` {any}\n", .{
-            test_case,
-            std.fmt.fmtSliceHexUpper(test_case),
-        });
-
-        var tmp = [_]u8{0} ** 128;
-        var out = [_]u8{0} ** 128;
-
-        var fix_in = io.fixedBufferStream(test_case);
-        var fix_tmp = io.fixedBufferStream(&tmp);
-        try cipher.encrypt(fix_in.reader(), fix_tmp.writer());
-        std.debug.print("> encrypted `{s}` {any}\n", .{
-            fix_tmp.getWritten(),
-            std.fmt.fmtSliceHexUpper(fix_tmp.getWritten()),
-        });
-
-        var fix_retmp = io.fixedBufferStream(fix_tmp.getWritten());
-        var fix_out = io.fixedBufferStream(&out);
-        try cipher.decrypt(fix_retmp.reader(), fix_out.writer());
-        std.debug.print("> decrypted `{s}` {any}\n", .{
-            fix_out.getWritten(),
-            std.fmt.fmtSliceHexUpper(fix_out.getWritten()),
-        });
-
-        try std.testing.expectEqualStrings(
-            test_case,
-            std.mem.trimRight(u8, fix_out.getWritten(), "\n"),
-        );
-    }
+test "blockmixCipher" {
+    const cipher = blockmixCipher.cipher();
+    inline for (test_cases) |test_case|
+        try cipher.expectRoundTrip(test_case);
 }
 
 fn printCodes(
@@ -219,6 +258,7 @@ pub fn main() !void {
 
     var cipher: enum {
         kurtis,
+        blockmix,
     } = .kurtis;
 
     var args = try std.process.argsWithAllocator(arena.allocator());
@@ -260,7 +300,8 @@ pub fn main() !void {
     }
 
     const cipher_inst = switch (cipher) {
-        .kurtis => kurtisCipher.box(),
+        .kurtis => kurtisCipher.cipher(),
+        .blockmix => blockmixCipher.cipher(),
     };
 
     var bufout = io.bufferedWriter(out.writer());
