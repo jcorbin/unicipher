@@ -36,6 +36,30 @@ const kurtisCipher = struct {
     }
 };
 
+const kurtisExtCipher = struct {
+    fn cipher() Cipher {
+        return .{ .encode = encode, .decode = decode };
+    }
+
+    fn encode(c0: u7, c1: u7) u21 {
+        // So upstream works by the same scheme as above, but laid out onto 4 utf8 bytes like:
+        //     240 = 0b11110_000
+        //     144 = 0b10_010000 <-- 1 extra bit wired on
+        //     128 = 0b10_000000
+        //     128 = 0b10_000000
+        // So that's just an extra 17th bit flipped:
+        return kurtisCipher.encode(c0, c1) | 0b1 << 16;
+    }
+
+    fn decode(unic: u21) ![2]u7 {
+        // must have only the 17th bit set outside of u14 space
+        if (unic >> 14 != 0b0000100) {
+            return error.CodepointOutOfRange;
+        }
+        return kurtisCipher.decode(unic & 0b11_111111_111111);
+    }
+};
+
 const blockmixCipher = struct {
     fn cipher() Cipher {
         return .{ .encode = encode, .decode = decode };
@@ -198,6 +222,12 @@ test "kurtisCipher" {
         try cipher.expectRoundTrip(test_case);
 }
 
+test "kurtisExtCipher" {
+    const cipher = kurtisExtCipher.cipher();
+    inline for (test_cases) |test_case|
+        try cipher.expectRoundTrip(test_case);
+}
+
 test "blockmixCipher" {
     const cipher = blockmixCipher.cipher();
     inline for (test_cases) |test_case|
@@ -258,6 +288,7 @@ pub fn main() !void {
 
     var cipher: enum {
         kurtis,
+        kurtisExt,
         blockmix,
     } = .kurtis;
 
@@ -301,6 +332,7 @@ pub fn main() !void {
 
     const cipher_inst = switch (cipher) {
         .kurtis => kurtisCipher.cipher(),
+        .kurtisExt => kurtisExtCipher.cipher(),
         .blockmix => blockmixCipher.cipher(),
     };
 
